@@ -30,34 +30,55 @@ def get_coordinates_input(prompt):
             print("Invalid input. Please enter two numbers separated by a comma.")
 
 def calculate_reachability(box_height, box_width, box_length, pallet_height, pallet_width, pallet_length, layers, robot_type, master_point, robot_height, boxes_per_layer):
-    robot_reach = {1: 1600, 2: 1800, 3: 2000}[robot_type]
+    robot_reach = {
+        1: (1000, 1200),  # CS612: Easy reach 1000mm, max reach 1200mm
+        2: (1300, 1500),  # CS620: Easy reach 1300mm, max reach 1500mm
+        3: (1500, 1800)   # CS625: Easy reach 1500mm, max reach 1800mm
+    }[robot_type]
     
     box_data = []
+    max_height_increase = 0
 
     for layer in range(1, layers + 1):
-        for box in range(1, boxes_per_layer + 1):
+        for box in range(1, int(boxes_per_layer) + 1):
             box_id = f"L{layer:02d}B{box:02d}"
             
-            # Calculate box position
-            x_pos = master_point[0] + ((box - 1) % (pallet_width / box_width)) * box_width
-            y_pos = master_point[1] + ((box - 1) // (pallet_width / box_width)) * box_length
-            z_pos = 60 + (box_height * (layer - 1))  # Start at 60 mm (pallet height)
+            # Calculate box position relative to the pallet
+            x_rel = ((box - 1) % (pallet_width // box_width)) * box_width
+            y_rel = ((box - 1) // (pallet_width // box_width)) * box_length
+            z_rel = pallet_height + (box_height * (layer - 1))
             
-            # Calculate distance from robot base to box
-            distance = math.sqrt((x_pos ** 2) + (y_pos ** 2) + ((z_pos - robot_height) ** 2))
+            # Calculate absolute box position
+            x_pos = master_point[0] + x_rel
+            y_pos = master_point[1] + y_rel
+            z_pos = z_rel
             
-            is_reachable = distance <= robot_reach
+            # Check if the box is completely within the pallet dimensions
+            if (x_rel + box_width <= pallet_width and 
+                y_rel + box_length <= pallet_length):
+                
+                # Calculate distance from robot base to box center
+                distance = math.sqrt((x_pos + box_width/2)**2 + (y_pos + box_length/2)**2 + (z_pos + box_height/2 - robot_height)**2)
+                
+                if distance <= robot_reach[0]:
+                    reachability = 'easy'
+                elif distance <= robot_reach[1]:
+                    reachability = 'difficult'
+                    max_height_increase = max(max_height_increase, 700)  # Trigger 7th axis
+                else:
+                    reachability = 'unreachable'
+                    max_height_increase = max(max_height_increase, 700)  # Trigger 7th axis
 
-            box_data.append({
-                'id': box_id,
-                'layer': layer,
-                'reachable': is_reachable,
-                'position': (x_pos, y_pos, z_pos)
-            })
+                box_data.append({
+                    'id': box_id,
+                    'layer': layer,
+                    'reachability': reachability,
+                    'position': (x_pos, y_pos, z_pos)
+                })
 
-    return box_data
+    return box_data, max_height_increase
 
-def plot_boxes(box_data, robot_reach, robot_height, pallet_width, pallet_length, box_width, box_length, box_height):
+def plot_boxes(box_data, robot_type, robot_height, pallet_width, pallet_length, box_width, box_length, box_height, master_point):
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
@@ -76,10 +97,7 @@ def plot_boxes(box_data, robot_reach, robot_height, pallet_width, pallet_length,
 
     for box in box_data:
         x, y, z = box['position']
-        if box['reachable']:
-            color = 'green'
-        else:
-            color = 'red'
+        color = {'easy': 'green', 'difficult': 'orange', 'unreachable': 'red'}[box['reachability']]
         
         cube = cuboid_data((x, y, z), size=(box_width, box_length, box_height))
         faces = Poly3DCollection(cube, alpha=0.25, linewidths=1, edgecolors='k')
@@ -89,17 +107,40 @@ def plot_boxes(box_data, robot_reach, robot_height, pallet_width, pallet_length,
     # Plot robot base
     ax.scatter([0], [0], [robot_height], c='b', marker='^', s=100, label='Robot Base')
 
-    # Plot robot reach sphere (semi-transparent)
-    u, v = np.mgrid[0:2*np.pi:20j, 0:np.pi:10j]
-    x = robot_reach * np.cos(u) * np.sin(v)
-    y = robot_reach * np.sin(u) * np.sin(v)
-    z = robot_reach * np.cos(v) + robot_height
-    ax.plot_wireframe(x, y, z, color="b", alpha=0.1)
+    # Plot robot stand base
+    stand_radius = 200
+    stand_height = robot_height
+    theta = np.linspace(0, 2*np.pi, 100)
+    z = np.linspace(0, stand_height, 100)
+    theta, z = np.meshgrid(theta, z)
+    x = stand_radius * np.cos(theta)
+    y = stand_radius * np.sin(theta)
+    ax.plot_surface(x, y, z, color='gray', alpha=0.5)
+
+    # Plot robot reach spheres
+    robot_reach = {
+        1: (1000, 1200),
+        2: (1300, 1500),
+        3: (1500, 1800)
+    }[robot_type]
+
+    for reach in robot_reach:
+        u, v = np.mgrid[0:2*np.pi:20j, 0:np.pi:10j]
+        x = reach * np.cos(u) * np.sin(v)
+        y = reach * np.sin(u) * np.sin(v)
+        z = reach * np.cos(v) + robot_height
+        ax.plot_wireframe(x, y, z, color="b", alpha=0.1)
 
     # Plot pallet
     pallet_corners = [
-        [0, 0, 0], [pallet_width, 0, 0], [pallet_width, pallet_length, 0], [0, pallet_length, 0],
-        [0, 0, 60], [pallet_width, 0, 60], [pallet_width, pallet_length, 60], [0, pallet_length, 60]
+        [master_point[0], master_point[1], 0], 
+        [master_point[0] + pallet_width, master_point[1], 0], 
+        [master_point[0] + pallet_width, master_point[1] + pallet_length, 0], 
+        [master_point[0], master_point[1] + pallet_length, 0],
+        [master_point[0], master_point[1], 60], 
+        [master_point[0] + pallet_width, master_point[1], 60], 
+        [master_point[0] + pallet_width, master_point[1] + pallet_length, 60], 
+        [master_point[0], master_point[1] + pallet_length, 60]
     ]
     for i, j in [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]:
         ax.plot3D(*zip(pallet_corners[i], pallet_corners[j]), color="brown")
@@ -111,13 +152,17 @@ def plot_boxes(box_data, robot_reach, robot_height, pallet_width, pallet_length,
     
     # Create custom legend
     green_proxy = plt.Rectangle((0, 0), 1, 1, fc="green", alpha=0.25)
+    orange_proxy = plt.Rectangle((0, 0), 1, 1, fc="orange", alpha=0.25)
     red_proxy = plt.Rectangle((0, 0), 1, 1, fc="red", alpha=0.25)
-    ax.legend([green_proxy, red_proxy, 'b^'], ['Reachable', 'Unreachable', 'Robot Base'])
+    gray_proxy = plt.Rectangle((0, 0), 1, 1, fc="gray", alpha=0.5)
+    ax.legend([green_proxy, orange_proxy, red_proxy, 'b^', gray_proxy], 
+              ['Easy Reach', 'Difficult/Unreachable', 'Unreachable', 'Robot Base', 'Robot Stand'])
 
     # Set axes limits
-    ax.set_xlim(0, max(pallet_width, robot_reach))
-    ax.set_ylim(0, max(pallet_length, robot_reach))
-    ax.set_zlim(0, max(robot_height + robot_reach, 60 + box_height * len(set(box['layer'] for box in box_data))))
+    max_reach = max(robot_reach)
+    ax.set_xlim(-max_reach, max(master_point[0] + pallet_width, max_reach))
+    ax.set_ylim(-max_reach, max(master_point[1] + pallet_length, max_reach))
+    ax.set_zlim(0, max(robot_height + max_reach, 60 + box_height * len(set(box['layer'] for box in box_data))))
 
     plt.show()
 
@@ -137,7 +182,7 @@ def main():
     
     boxes_per_layer = math.floor((pallet_width / box_width) * (pallet_length / box_length))
     
-    box_data = calculate_reachability(
+    box_data, max_height_increase = calculate_reachability(
         box_height, box_width, box_length, pallet_height, pallet_width, pallet_length,
         layers, robot_type, master_point, robot_height, boxes_per_layer
     )
@@ -148,10 +193,10 @@ def main():
     reachable_layers = [0] * (layers + 1)
 
     for box in box_data:
-        status = "Reachable" if box['reachable'] else "Not Reachable"
+        status = "Reachable" if box['reachability'] != 'unreachable' else "Not Reachable"
         print(f"Box ID: {box['id']}, Layer: {box['layer']}, Status: {status}, Position: {box['position']}")
         
-        if box['reachable']:
+        if box['reachability'] != 'unreachable':
             reachable_boxes += 1
             reachable_layers[box['layer']] += 1
         else:
@@ -170,8 +215,7 @@ def main():
     print(f"Number of partially or not reachable layers: {layers - fully_reachable_layers}")
 
     # Plot the boxes
-    robot_reach = {1: 1600, 2: 1800, 3: 2000}[robot_type]
-    plot_boxes(box_data, robot_reach, robot_height, pallet_width, pallet_length, box_width, box_length, box_height)
+    plot_boxes(box_data, robot_type, robot_height + max_height_increase, pallet_width, pallet_length, box_width, box_length, box_height, master_point)
 
 if __name__ == "__main__":
     main()
